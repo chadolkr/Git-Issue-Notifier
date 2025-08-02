@@ -1,0 +1,5 @@
+2025-08-02 17:58:16,425 - ERROR - 클라이언트 초기화 중 알 수 없는 오류 발생: 401 {"message": "Bad credentials", "documentation_url": "https://docs.github.com/rest", "status": "401"}
+2025-08-02 17:58:16,425 - INFO - 이슈 모니터가 github 플랫폼에 대해 시작되었습니다. 1분마다 확인합니다...
+2025-08-02 17:59:16,473 - ERROR - 클라이언트가 초기화되지 않았습니다. 모니터링을 실행할 수 없습니다.
+2025-08-02 18:00:16,528 - ERROR - 클라이언트가 초기화되지 않았습니다. 모니터링을 실행할 수 없습니다.
+2025-08-02 18:00:48,834 - CRITICAL - 클라이언트 초기화 중 알 수 없는 오류 발생: 401 {"message": "Bad credentials", "documentation_url": "https://docs.github.com/rest", "status": "401"}. 프로그램이 종료됩니다.
