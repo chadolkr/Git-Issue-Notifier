@@ -1,0 +1,1 @@
+2025-08-02 20:18:56,006 - CRITICAL - 클라이언트 초기화 중 알 수 없는 오류 발생: 401 {"message": "Bad credentials", "documentation_url": "https://docs.github.com/rest", "status": "401"}. 프로그램이 종료됩니다.
