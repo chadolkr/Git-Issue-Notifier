@@ -19,7 +19,7 @@ def namer(name):
     return name + '.gz'
 
 def rotator(source, dest):
-    with open(source, 'rb') as f_in, gzip.open(dest, 'wb') as f_out:
+    with open(source, 'rb') as f_in, gzip.open(namer(dest), 'wb') as f_out:
         f_out.writelines(f_in)
     os.remove(source)
 
@@ -31,7 +31,7 @@ def _read_config(config_file):
     """
     config = configparser.ConfigParser()
     if not os.path.exists(config_file):
-        print(f"CRITICAL: '{config_file}' 설정 파일을 찾을 수 없습니다. config.ini.sec 파일을 생성하고 설정을 입력해주세요. 프로그램이 종료됩니다.")
+        print(f"CRITICAL: '{config_file}' 설정 파일을 찾을 수 없습니다. config.ini 파일을 생성하고 설정을 입력해주세요. 프로그램이 종료됩니다.")
         sys.exit(1)
     
     try:
@@ -57,19 +57,35 @@ def setup_logging(config):
     os.makedirs(log_dir, exist_ok=True)
     
     log_file = os.path.join(log_dir, 'issue_monitor.log')
-    LOG_BACKUP_COUNT = 7
+    
+    LOG_BACKUP_COUNT = config.getint('logging', 'backup_count', fallback=7)
+    
+    rotation_when = config.get('logging', 'rotation_when', fallback='D')
+    rotation_interval = config.getint('logging', 'rotation_interval', fallback=1)
+
+    if rotation_when == 'D':
+        suffix = '%Y-%m-%d'
+    elif rotation_when == 'H':
+        suffix = '%Y-%m-%d_%H'
+    elif rotation_when == 'M':
+        suffix = '%Y-%m-%d_%H-%M'
+    else:
+        suffix = '%Y-%m-%d'
 
     logger = logging.getLogger('issue_monitor')
     logger.setLevel(logging.INFO)
 
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+
     handler = logging.handlers.TimedRotatingFileHandler(
         log_file,
-        when='midnight',
-        interval=1,
+        when=rotation_when,
+        interval=rotation_interval,
         backupCount=LOG_BACKUP_COUNT,
         encoding='utf-8'
     )
-    handler.suffix = '%Y-%m-%d'
+    handler.suffix = suffix
     handler.rotator = rotator
     formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
     handler.setFormatter(formatter)
@@ -83,12 +99,17 @@ def setup_logging(config):
 
 class IssueMonitor:
     def __init__(self, config_file='config.ini.sec'):
-        self.config = _read_config(config_file)
+        self.config_file = config_file
+        self.config = _read_config(self.config_file)
         
         self.logger = setup_logging(self.config)
 
         self.platform = self.config.get('general', 'platform', fallback=None)
+        self.config_reload_interval = self.config.getint('general', 'config_reload_interval', fallback=10)
+        self.monitor_interval = self.config.getint('general', 'monitor_interval', fallback=1)
         
+        self.last_config_mtime = os.path.getmtime(self.config_file)
+
         if not self.platform or self.platform not in ['gitlab', 'github']:
             self.logger.critical(f"config.ini 파일의 [general] 섹션에 'platform' 설정이 없거나 유효하지 않습니다. "
                                 f"'gitlab' 또는 'github' 중 하나를 선택하여 설정해주세요. 프로그램이 종료됩니다.")
@@ -159,18 +180,15 @@ class IssueMonitor:
                 webhook_url = self.config['slack']['webhook_url']
                 webhook = WebhookClient(webhook_url)
 
-                # payload에서 제목, 본문, 댓글 내용 추출
                 title = payload.get('title', '')
                 content = payload.get('content', '')
                 comment = payload.get('comment', '')
                 url = payload.get('url', '')
 
-                # 텍스트를 줄 단위로 요약
                 title_summary = truncate_by_lines(title)
                 content_summary = truncate_by_lines(content)
                 comment_summary = truncate_by_lines(comment)
 
-                # 상태에 따라 Slack 메시지 포맷 재구성
                 status = payload.get('status', '수정')
                 if status == '등록':
                     slack_message = f"**[새로운 이슈 등록]**\n제목: {title_summary}\n내용: {content_summary}\nURL: {url}"
@@ -183,7 +201,7 @@ class IssueMonitor:
                 elif status == 'comment 등록':
                     slack_message = f"**[새로운 댓글]**\n이슈 제목: {title_summary}\n내용: {comment_summary}\nURL: {url}"
                 else:
-                    slack_message = message  # 기본 메시지 사용
+                    slack_message = message
 
                 response = webhook.send(text=slack_message)
                 self.logger.info(f"Slack 알림이 성공적으로 전송되었습니다. 상태 코드: {response.status_code}")
@@ -332,12 +350,63 @@ class IssueMonitor:
             self._check_github()
         self.logger.info(f"[{self.platform}] 변경 사항 확인 종료.")
 
+    def _reload_config_and_reschedule(self):
+        """설정 파일을 다시 읽고, 변경 사항이 있으면 스케줄링을 재설정합니다."""
+        current_mtime = os.path.getmtime(self.config_file)
+        
+        if current_mtime > self.last_config_mtime:
+            self.logger.info("설정 파일 변경이 감지되었습니다. 설정을 다시 로드합니다.")
+            
+            new_config = _read_config(self.config_file)
+            new_reload_interval = new_config.getint('general', 'config_reload_interval', fallback=10)
+            new_monitor_interval = new_config.getint('general', 'monitor_interval', fallback=1)
+
+            changed_configs = []
+            
+            for section in new_config.sections():
+                for key, new_value in new_config.items(section):
+                    try:
+                        old_value = self.config.get(section, key)
+                        if old_value != new_value:
+                            changed_configs.append(f"[{section}] '{key}' 값이 '{old_value}' -> '{new_value}'로 변경되었습니다.")
+                    except (configparser.NoSectionError, configparser.NoOptionError):
+                        changed_configs.append(f"[{section}] '{key}' 값이 새로 추가되었습니다: '{new_value}'")
+
+            if changed_configs:
+                self.logger.info("설정 내용이 변경되었습니다. 스케줄링을 재설정하고 클라이언트를 재초기화합니다.")
+                
+                for change in changed_configs:
+                    self.logger.info(change)
+
+                self.config = new_config
+                self.config_reload_interval = new_reload_interval
+                self.monitor_interval = new_monitor_interval
+                self.platform = self.config.get('general', 'platform')
+                
+                self.logger = setup_logging(self.config)
+                
+                self.client = self._get_client()
+
+                schedule.clear()
+                
+                schedule.every(self.monitor_interval).minutes.do(self.run_check)
+                schedule.every(self.config_reload_interval).minutes.do(self._reload_config_and_reschedule)
+                self.logger.info(f"설정 파일이 성공적으로 재로드되었습니다. 이슈 모니터링 주기: {self.monitor_interval}분, 설정 재로드 주기: {self.config_reload_interval}분.")
+            else:
+                self.logger.info("설정 파일의 수정 시간은 변경되었으나, 내용 변경은 없습니다.")
+
+            self.last_config_mtime = current_mtime
+        else:
+            self.logger.info("설정 파일에 변경 사항이 없습니다.")
+
+
     def start(self):
         """예약된 모니터링 작업을 시작합니다."""
         self.run_check()
 
-        self.logger.info(f"이슈 모니터가 {self.platform} 플랫폼에 대해 시작되었습니다. 1분마다 확인합니다...")
-        schedule.every(1).minutes.do(self.run_check)
+        self.logger.info(f"이슈 모니터가 {self.platform} 플랫폼에 대해 시작되었습니다. {self.monitor_interval}분마다 확인합니다...")
+        schedule.every(self.monitor_interval).minutes.do(self.run_check)
+        schedule.every(self.config_reload_interval).minutes.do(self._reload_config_and_reschedule)
         
         while True:
             schedule.run_pending()
